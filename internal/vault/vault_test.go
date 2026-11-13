@@ -69,3 +69,9 @@ func TestAtomicWriteRejectsSymlink(t *testing.T) {
 		t.Fatal("target changed")
 	}
 }
+func TestReconcileAddsAfterUnterminatedComment(t *testing.T) {
+	got := Reconcile("# retained", map[string]string{}, map[string]string{"NEW": "value"})
+	if got != "# retained\nNEW=\"value\"\n" {
+		t.Fatalf("malformed reconciled document: %q", got)
+	}
+}

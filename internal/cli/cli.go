@@ -7,25 +7,31 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
+	"env-host/internal/auth"
 	"env-host/internal/envfile"
 	"env-host/internal/project"
 	"env-host/internal/vault"
 )
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 const help = `envh - project environments, direct host execution
 
   envh init [--env FILE] [--replace]        Initialize and optionally import
+  envh init --passphrase                   Use a project passphrase if Keychain is unavailable
   envh import [--replace] FILE             Import dotenv (last duplicate wins)
   envh set NAME [--stdin]                  Set a value (hidden prompt by default)
   envh get NAME                           Reveal one value to stdout
   envh list                               List variable names only
   envh unset NAME [NAME...]                Delete variables
-  envh passwd                             Change this project's passphrase
-  envh manage                             Interactive management menu
+  envh passwd                             Change a passphrase project's passphrase
+  envh manage                             Edit environment in your CLI editor
+  envh migrate                            Move a passphrase project to macOS Keychain
+  envh auth status                        Check whether macOS user authentication is available
+  envh auth probe                         Test Touch ID/login prompt and Keychain access
   envh snap [--force]                      Write names to .env.example
   envh --run COMMAND [ARGS...]             Run with project values injected
   envh --unsafe --run COMMAND [ARGS...]    Same direct execution
@@ -34,6 +40,8 @@ const help = `envh - project environments, direct host execution
 
 Project variables override inherited variables. Commands run without isolation.
 Flags after --run belong to the application. No shell is inserted.
+macOS user authentication prompts for Touch ID or the login password before
+envh reads a project key from Keychain. Existing passphrase projects remain usable.
 Passphrases are read from the terminal or ENVH_PASSPHRASE for automation.
 ENVH_HOME selects the local storage directory; envh control variables are not
 passed to the application. Each project has its own encrypted vault/passphrase.
@@ -126,13 +134,14 @@ func command(id, cmd string, args []string) (int, error) {
 		allowed["--replace"] = false
 		allowed["--new-project"] = false
 		allowed["--register"] = false
+		allowed["--passphrase"] = false
 	case "import":
 		allowed["--replace"] = false
 	case "set":
 		allowed["--stdin"] = false
 	case "snap":
 		allowed["--force"] = false
-	case "get", "list", "unset", "manage", "passwd":
+	case "get", "list", "unset", "manage", "passwd", "migrate", "auth":
 	default:
 		return 2, fmt.Errorf("unknown command; run envh --help")
 	}
@@ -151,8 +160,28 @@ func command(id, cmd string, args []string) (int, error) {
 			return 2, err
 		}
 	}
+	if cmd == "auth" {
+		if len(pos) != 1 {
+			return 2, fmt.Errorf("usage: envh auth status|probe")
+		}
+		switch pos[0] {
+		case "status":
+			if err := auth.Ready(); err != nil {
+				return 1, err
+			}
+			fmt.Println("macOS Touch ID or login-password authentication is available.")
+		case "probe":
+			if err := auth.Probe(); err != nil {
+				return 1, err
+			}
+			fmt.Println("macOS authentication and Keychain access succeeded.")
+		default:
+			return 2, fmt.Errorf("usage: envh auth status|probe")
+		}
+		return 0, nil
+	}
 	switch cmd {
-	case "init", "list", "snap", "manage", "passwd":
+	case "init", "list", "snap", "manage", "passwd", "migrate":
 		if len(pos) != 0 {
 			return 2, fmt.Errorf("unexpected arguments")
 		}
@@ -173,6 +202,9 @@ func command(id, cmd string, args []string) (int, error) {
 	}
 	if cmd == "manage" {
 		return 0, manage(id)
+	}
+	if cmd == "migrate" {
+		return 0, migrate(id)
 	}
 	selected, root, err := resolve(id)
 	if err != nil {
@@ -213,7 +245,7 @@ func command(id, cmd string, args []string) (int, error) {
 			return 1, err
 		}
 	}
-	pass, err := password(false)
+	pass, err := unlockProject(store, selected)
 	if err != nil {
 		return 1, err
 	}
@@ -267,11 +299,23 @@ func command(id, cmd string, args []string) (int, error) {
 	case "snap":
 		err = snapshot(root, values, opts["--force"] != "")
 	case "passwd":
+		method, e := store.AuthMethod(selected)
+		if e != nil {
+			return 1, e
+		}
+		if method != "passphrase" {
+			return 1, fmt.Errorf("this project uses macOS authentication; no env-host passphrase to change")
+		}
 		fmt.Fprintln(os.Stderr, "Choose the new passphrase.")
 		var next string
 		next, err = passwordFrom("ENVH_NEW_PASSPHRASE", true)
 		if err == nil {
-			err = store.Save(selected, next, registeredRoot, values)
+			_, _, document, readErr := store.LoadDocument(selected, pass)
+			if readErr != nil {
+				err = readErr
+			} else {
+				err = store.SaveWithDocument(selected, next, registeredRoot, values, document, "passphrase")
+			}
 		}
 	}
 	return 0, err
@@ -381,10 +425,18 @@ func initialize(opts map[string]string) error {
 			return nil
 		}
 	}
-	pass, e := password(!exists)
+	pass, method, e := credentialForInit(store, id, exists, opts["--passphrase"] != "")
 	if e != nil {
 		return e
 	}
+	keychainCreated := !exists && method == auth.Method
+	finished := false
+	defer func() {
+		if keychainCreated && !finished {
+			locator, _ := project.Locator(id)
+			auth.Delete(locator)
+		}
+	}()
 	unlock, e := store.Lock()
 	if e != nil {
 		return e
@@ -431,9 +483,15 @@ func initialize(opts map[string]string) error {
 			return e
 		}
 	}
-	if e = store.Save(id, pass, root, values); e != nil {
+	if !exists && method == auth.Method {
+		e = store.SaveWithDocument(id, pass, root, values, vault.Render(values), method)
+	} else {
+		e = store.Save(id, pass, root, values)
+	}
+	if e != nil {
 		return fmt.Errorf("could not save vault; marker preserved for retry: %w", e)
 	}
+	finished = true
 	fmt.Printf("Initialized project (%d variables).\n", len(values))
 	return nil
 }
@@ -514,47 +572,90 @@ func snapshot(root string, values map[string]string, force bool) error {
 }
 
 func manage(id string) error {
-	for {
-		fmt.Fprintln(os.Stderr, "\n1 List  2 Set  3 Reveal  4 Delete  5 Import  6 Snapshot  q Quit")
-		choice, e := line("> ")
-		if e != nil {
-			return e
-		}
-		var cmd string
-		var args []string
-		switch choice {
-		case "q", "quit", "":
-			return nil
-		case "1":
-			cmd = "list"
-		case "2", "3", "4":
-			name, e := line("Variable name: ")
-			if e != nil {
-				return e
-			}
-			args = []string{name}
-			cmd = map[string]string{"2": "set", "3": "get", "4": "unset"}[choice]
-		case "5":
-			path, e := line("Environment file: ")
-			if e != nil {
-				return e
-			}
-			cmd = "import"
-			args = []string{path}
-		case "6":
-			cmd = "snap"
-		default:
-			fmt.Fprintln(os.Stderr, "Choose 1–6 or q.")
-			continue
-		}
-		_, e = command(id, cmd, args)
-		if e != nil {
-			fmt.Fprintln(os.Stderr, "envh:", e)
-		}
-		if cmd == "get" {
-			fmt.Fprintln(os.Stdout)
-		}
+	selected, _, e := resolve(id)
+	if e != nil {
+		return e
 	}
+	store, e := vault.Open()
+	if e != nil {
+		return e
+	}
+	pass, e := unlockProject(store, selected)
+	if e != nil {
+		return e
+	}
+	unlock, e := store.Lock()
+	if e != nil {
+		return e
+	}
+	before, root, document, e := store.LoadDocument(selected, pass)
+	unlock()
+	if e != nil {
+		return e
+	}
+	work, e := os.CreateTemp(store.Dir, ".envh-edit-*")
+	if e != nil {
+		return e
+	}
+	path := work.Name()
+	defer os.Remove(path)
+	if e = work.Chmod(0600); e == nil {
+		_, e = work.WriteString(document)
+	}
+	if e == nil {
+		e = work.Sync()
+	}
+	closeErr := work.Close()
+	if e != nil {
+		return e
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if e = edit(path); e != nil {
+		return e
+	}
+	info, e := os.Lstat(path)
+	if e != nil || !info.Mode().IsRegular() || info.Size() > envfile.MaxBytes {
+		return fmt.Errorf("editor did not leave a valid environment file")
+	}
+	data, e := os.ReadFile(path)
+	if e != nil {
+		return e
+	}
+	defer clear(data)
+	modified := string(data)
+	after, dups, e := envfile.Parse(strings.NewReader(modified))
+	if e != nil {
+		return e
+	}
+	if len(dups) > 0 {
+		return fmt.Errorf("duplicate variable %s in edited file", dups[0])
+	}
+	if modified == document {
+		return nil
+	}
+	unlock, e = store.Lock()
+	if e != nil {
+		return e
+	}
+	defer unlock()
+	current, currentRoot, currentDoc, e := store.LoadDocument(selected, pass)
+	if e != nil {
+		return e
+	}
+	if currentRoot != root || currentDoc != document || !reflect.DeepEqual(current, before) {
+		return fmt.Errorf("environment changed while editing; reopen envh manage")
+	}
+	method, e := store.AuthMethod(selected)
+	if e != nil {
+		return e
+	}
+	if e = store.SaveWithDocument(selected, pass, root, after, modified, method); e != nil {
+		return e
+	}
+	fmt.Printf("Saved %d variables.\n", len(after))
+	return nil
 }
 
 func run(id string, args []string) (int, error) {
@@ -569,7 +670,7 @@ func run(id string, args []string) (int, error) {
 	if e != nil {
 		return 1, e
 	}
-	pass, e := password(false)
+	pass, e := unlockProject(store, id)
 	if e != nil {
 		return 1, e
 	}

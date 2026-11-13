@@ -1,7 +1,7 @@
 # env-host implementation
 
 Build and maintain the usable Go CLI. The current scope is project initialization,
-encrypted project environment storage, import, management, snapshots, and direct
+encrypted project environment storage, dotenv editor management, import, snapshots, and direct
 host execution with environment injection. The user's revised scope supersedes
 the removed architecture/task gates. Do not restore deleted planning files.
 
@@ -15,6 +15,8 @@ the removed architecture/task gates. Do not restore deleted planning files.
 - Use Go and prefer the standard library. Keep dependencies justified and pinned.
 - Test actual CLI workflows, data integrity, failure handling, and execution.
 - Keep README/help synchronized with implemented behavior.
+- macOS authentication currently uses LocalAuthentication before the CLI reads a
+  login Keychain item. Do not describe the item itself as biometric protected.
 - Do not restore or overwrite unrelated user changes. Do not publish or use real
   credentials in tests.
 

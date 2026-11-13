@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"env-host/internal/auth"
 	"env-host/internal/project"
+	"env-host/internal/vault"
 	"io"
 	"os"
 	"os/exec"
@@ -15,6 +17,15 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__editor" {
+		path := os.Args[len(os.Args)-1]
+		if os.Getenv("EDITOR_FIXTURE") != "" {
+			if err := os.WriteFile(path, []byte(os.Getenv("EDITOR_FIXTURE")), 0600); err != nil {
+				os.Exit(1)
+			}
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "__cli" {
 		os.Exit(Main(os.Args[2:]))
 	}
@@ -94,11 +105,38 @@ func (f *fixture) ok(input string, args ...string) string {
 	return out
 }
 
+func TestMigrationChecksAuthenticationBeforePassphrase(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS authentication test")
+	}
+	if err := auth.Ready(); err == nil {
+		t.Skip("macOS authentication is available")
+	}
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	c := f.cmd("migrate")
+	for i, v := range c.Env {
+		if strings.HasPrefix(v, "ENVH_PASSPHRASE=") {
+			c.Env = append(c.Env[:i], c.Env[i+1:]...)
+			break
+		}
+	}
+	c.Stdin = strings.NewReader("")
+	output, err := c.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "LocalAuthentication") || strings.Contains(string(output), "terminal") {
+		t.Fatalf("expected authentication availability error before passphrase prompt, got %q: %v", output, err)
+	}
+	_, statusErr, code := f.invoke("", "auth", "status")
+	if code != 1 || !strings.Contains(statusErr, "LocalAuthentication") {
+		t.Fatalf("unexpected auth status: exit %d, %q", code, statusErr)
+	}
+}
+
 func TestFullWorkflow(t *testing.T) {
 	f := newFixture(t)
 	source := "FIXTURE_SECRET='synthetic value'\nEMPTY=\nDEBUG=true\n"
 	os.WriteFile(filepath.Join(f.dir, ".env"), []byte(source), 0600)
-	out := f.ok("", "init", "--env", ".env")
+	out := f.ok("", "init", "--passphrase", "--env", ".env")
 	if strings.Contains(out, "synthetic value") {
 		t.Fatal("import exposed value")
 	}
@@ -106,7 +144,7 @@ func TestFullWorkflow(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	f.ok("", "init")
+	f.ok("", "init", "--passphrase")
 	again, _ := project.Read(f.dir)
 	if again != id {
 		t.Fatal("repeat init changed identity")
@@ -159,7 +197,7 @@ func TestFullWorkflow(t *testing.T) {
 
 func TestImportFailureIsAtomicAndProjectsIndependent(t *testing.T) {
 	f := newFixture(t)
-	f.ok("", "init")
+	f.ok("", "init", "--passphrase")
 	f.ok("first", "set", "FIXTURE_SECRET", "--stdin")
 	os.WriteFile(filepath.Join(f.dir, "input.env"), []byte("NEW=x\nFIXTURE_SECRET=second\n"), 0600)
 	if _, _, code := f.invoke("", "import", "input.env"); code == 0 {
@@ -176,7 +214,7 @@ func TestImportFailureIsAtomicAndProjectsIndependent(t *testing.T) {
 	firstRoot := f.dir
 	f.dir = filepath.Join(filepath.Dir(f.dir), "other")
 	os.Mkdir(f.dir, 0700)
-	f.ok("", "init")
+	f.ok("", "init", "--passphrase")
 	f.ok("other", "set", "FIXTURE_SECRET", "--stdin")
 	if got := f.ok("", "get", "FIXTURE_SECRET"); got != "other" {
 		t.Fatal("namespace bleed")
@@ -193,7 +231,7 @@ func TestImportFailureIsAtomicAndProjectsIndependent(t *testing.T) {
 
 func TestWrongPasswordAndUnsafeTargets(t *testing.T) {
 	f := newFixture(t)
-	f.ok("", "init")
+	f.ok("", "init", "--passphrase")
 	f.ok("sentinel", "set", "A", "--stdin")
 	c := f.cmd("get", "A")
 	for i, v := range c.Env {
@@ -226,7 +264,7 @@ func TestWrongPasswordAndUnsafeTargets(t *testing.T) {
 
 func TestConcurrentEdits(t *testing.T) {
 	f := newFixture(t)
-	f.ok("", "init")
+	f.ok("", "init", "--passphrase")
 	a, b := f.cmd("set", "A", "--stdin"), f.cmd("set", "B", "--stdin")
 	a.Stdin = strings.NewReader("a")
 	b.Stdin = strings.NewReader("b")
@@ -252,7 +290,7 @@ func TestRunReceivesInterrupt(t *testing.T) {
 		t.Skip("POSIX signal test")
 	}
 	f := newFixture(t)
-	f.ok("", "init")
+	f.ok("", "init", "--passphrase")
 	c := f.cmd("--run", f.exe, "__child", "wait")
 	out, e := c.StdoutPipe()
 	if e != nil {
@@ -291,5 +329,96 @@ func TestEnvironmentOverlayRemovesControlVariables(t *testing.T) {
 	got := environment([]string{"PATH=/bin", "TOKEN=old", "TOKEN=duplicate", "envh_passphrase=canary", "ENVH_HOME=/private/state"}, map[string]string{"TOKEN": "new", "EMPTY": ""})
 	if strings.Join(got, "\n") != "EMPTY=\nPATH=/bin\nTOKEN=new" {
 		t.Fatalf("unexpected environment: %v", got)
+	}
+}
+
+func TestManageEditsAndKeepsComments(t *testing.T) {
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	f.ok("first", "set", "ONE", "--stdin")
+	apply := func(doc string) {
+		t.Helper()
+		c := f.cmd("manage")
+		c.Env = append(c.Env, "VISUAL="+f.exe+" __editor", "EDITOR_FIXTURE="+doc)
+		out, e := c.CombinedOutput()
+		if e != nil {
+			t.Fatalf("manage failed: %v: %s", e, out)
+		}
+	}
+	apply("# Keep this note\nONE=\"changed\"\n# TWO=disabled\nTHREE=\"new\"\n")
+	if got := f.ok("", "list"); got != "ONE\nTHREE\n" {
+		t.Fatalf("commented entry active: %q", got)
+	}
+	if got := f.ok("", "get", "ONE"); got != "changed" {
+		t.Fatal("edit not applied")
+	}
+	// A later set updates the active line while preserving the comment.
+	f.ok("again", "set", "ONE", "--stdin")
+	c := f.cmd("manage")
+	c.Env = append(c.Env, "VISUAL="+f.exe+" __editor")
+	if out, e := c.CombinedOutput(); e != nil {
+		t.Fatalf("open failed: %v: %s", e, out)
+	}
+	// Inspect the encrypted document through the package API, not raw file bytes.
+	id, e := project.Read(f.dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	s := &vault.Store{Dir: filepath.Join(f.home, "projects")}
+	_, _, doc, e := s.LoadDocument(id, "synthetic test passphrase")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !strings.Contains(doc, "# Keep this note") || !strings.Contains(doc, "# TWO=disabled") || !strings.Contains(doc, "ONE=\"again\"") {
+		t.Fatalf("document was not preserved: %q", doc)
+	}
+}
+
+func TestManageRejectsMalformedEditWithoutChangingVault(t *testing.T) {
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	f.ok("good", "set", "ONE", "--stdin")
+	c := f.cmd("manage")
+	c.Env = append(c.Env, "VISUAL="+f.exe+" __editor", "EDITOR_FIXTURE=ONE=\"unterminated")
+	if e := c.Run(); e == nil {
+		t.Fatal("invalid editor result saved")
+	}
+	if got := f.ok("", "get", "ONE"); got != "good" {
+		t.Fatal("vault changed after invalid edit")
+	}
+}
+
+func TestChangePassphraseKeepsValuesAndComments(t *testing.T) {
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	f.ok("old-value", "set", "ONE", "--stdin")
+	c := f.cmd("manage")
+	c.Env = append(c.Env, "VISUAL="+f.exe+" __editor", "EDITOR_FIXTURE=# retained\nONE=\"old-value\"\n")
+	if out, e := c.CombinedOutput(); e != nil {
+		t.Fatalf("manage: %v %s", e, out)
+	}
+	c = f.cmd("passwd")
+	c.Env = append(c.Env, "ENVH_NEW_PASSPHRASE=new synthetic password")
+	if out, e := c.CombinedOutput(); e != nil {
+		t.Fatalf("passwd: %v %s", e, out)
+	}
+	if _, _, code := f.invoke("", "get", "ONE"); code == 0 {
+		t.Fatal("old password still opens vault")
+	}
+	c = f.cmd("get", "ONE")
+	for i, v := range c.Env {
+		if strings.HasPrefix(v, "ENVH_PASSPHRASE=") {
+			c.Env[i] = "ENVH_PASSPHRASE=new synthetic password"
+		}
+	}
+	out, e := c.Output()
+	if e != nil || string(out) != "old-value" {
+		t.Fatalf("new password failed: %v %s", e, out)
+	}
+	id, _ := project.Read(f.dir)
+	s := &vault.Store{Dir: filepath.Join(f.home, "projects")}
+	_, _, document, e := s.LoadDocument(id, "new synthetic password")
+	if e != nil || !strings.Contains(document, "# retained") {
+		t.Fatalf("comment lost after rekey: %v %q", e, document)
 	}
 }

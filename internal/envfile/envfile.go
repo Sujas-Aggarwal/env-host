@@ -126,14 +126,7 @@ func parseValue(v string) (string, error) {
 	if quote == '\'' {
 		return v[1:end], nil
 	}
-	// Restrict escapes to common dotenv escapes; never evaluate interpolation.
-	for i := 1; i < end; i++ {
-		if v[i] == '\\' {
-			i++
-			if i >= end || !strings.ContainsRune(`nrt"\`, rune(v[i])) {
-				return "", fmt.Errorf("invalid escape")
-			}
-		}
-	}
+	// Go's quoted escapes cover all control bytes emitted by the editor renderer.
+	// Unquote only decodes escapes; it never expands variables or runs commands.
 	return strconv.Unquote(v[:end+1])
 }
