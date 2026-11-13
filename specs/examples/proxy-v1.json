@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "integration_id": "fixture-http",
+  "upstream": {
+    "scheme": "https",
+    "host": "api.fixture.invalid",
+    "port": 443
+  },
+  "operations": [
+    {
+      "id": "submit",
+      "method": "POST",
+      "path": "/v1/fixture",
+      "match": "exact"
+    }
+  ],
+  "credential": {
+    "secret_name": "FIXTURE_API_KEY",
+    "header": "Authorization",
+    "prefix": "Bearer "
+  },
+  "remove_request_headers": [
+    "Authorization",
+    "Proxy-Authorization",
+    "Cookie"
+  ],
+  "remove_response_headers": [
+    "Set-Cookie"
+  ],
+  "request_json_remove_fields": [],
+  "limits": {
+    "request_bytes": 1048576,
+    "response_bytes": 10485760,
+    "timeout_ms": 30000,
+    "concurrent_requests": 4
+  },
+  "redirects": "deny",
+  "upgrades": "deny"
+}

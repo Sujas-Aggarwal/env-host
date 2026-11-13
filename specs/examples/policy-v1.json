@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "policy_id": "local-dev",
+  "revision": 1,
+  "filesystem": {
+    "allow": [
+      {
+        "id": "project-rw",
+        "path": "$PROJECT",
+        "rights": [
+          "read",
+          "write"
+        ],
+        "recursive": true
+      },
+      {
+        "id": "session-tmp",
+        "path": "$SESSION_TMP",
+        "rights": [
+          "read",
+          "write"
+        ],
+        "recursive": true
+      }
+    ],
+    "deny": [
+      {
+        "id": "project-marker",
+        "path": "$PROJECT/.h.env",
+        "rights": [
+          "read",
+          "write",
+          "execute"
+        ],
+        "recursive": false
+      }
+    ]
+  },
+  "network": {
+    "outbound": [],
+    "listeners": [
+      {
+        "address": "127.0.0.1",
+        "port": 3000,
+        "transport": "tcp"
+      }
+    ]
+  },
+  "environment": {
+    "inherit": [
+      "LANG",
+      "TERM",
+      "COLORTERM"
+    ],
+    "export_entries": [],
+    "public_config": {}
+  },
+  "integrations": []
+}

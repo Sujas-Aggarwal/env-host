@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "request_id": "00000000000000000000000000000001",
+  "kind": "response",
+  "op": "Session.Prepare",
+  "error": {
+    "code": "ENFORCEMENT_UNAVAILABLE",
+    "message": "Required platform isolation is not available.",
+    "retryable": false
+  }
+}

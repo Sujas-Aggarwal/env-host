@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "env-host declarative HTTP integration v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "integration_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+    },
+    "upstream": {
+      "type": "object",
+      "properties": {
+        "scheme": {
+          "const": "https"
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "scheme",
+        "host",
+        "port"
+      ],
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE",
+              "HEAD",
+              "OPTIONS"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/",
+            "maxLength": 2048
+          },
+          "match": {
+            "enum": [
+              "exact",
+              "segment-prefix"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "method",
+          "path",
+          "match"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "credential": {
+      "type": "object",
+      "properties": {
+        "secret_name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "maxLength": 128
+        },
+        "header": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{1,128}$"
+        },
+        "prefix": {
+          "type": "string",
+          "enum": [
+            "",
+            "Bearer "
+          ]
+        }
+      },
+      "required": [
+        "secret_name",
+        "header",
+        "prefix"
+      ],
+      "additionalProperties": false
+    },
+    "remove_request_headers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9-]{1,128}$"
+      },
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "remove_response_headers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9-]{1,128}$"
+      },
+      "maxItems": 128,
+      "uniqueItems": true
+    },
+    "request_json_remove_fields": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+      },
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "request_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10485760
+        },
+        "response_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 104857600
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300000
+        },
+        "concurrent_requests": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        }
+      },
+      "required": [
+        "request_bytes",
+        "response_bytes",
+        "timeout_ms",
+        "concurrent_requests"
+      ],
+      "additionalProperties": false
+    },
+    "redirects": {
+      "const": "deny"
+    },
+    "upgrades": {
+      "const": "deny"
+    }
+  },
+  "required": [
+    "schema_version",
+    "integration_id",
+    "upstream",
+    "operations",
+    "credential",
+    "remove_request_headers",
+    "remove_response_headers",
+    "request_json_remove_fields",
+    "limits",
+    "redirects",
+    "upgrades"
+  ],
+  "additionalProperties": false
+}

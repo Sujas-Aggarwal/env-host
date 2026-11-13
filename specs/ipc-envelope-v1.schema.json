@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "env-host control envelope v1",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
+    },
+    "kind": {
+      "enum": [
+        "request",
+        "response",
+        "event"
+      ]
+    },
+    "op": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Za-z]+\\.[A-Z][A-Za-z]+$",
+      "maxLength": 64
+    },
+    "body": {
+      "type": "object"
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_ARGUMENT",
+            "PROJECT_NOT_FOUND",
+            "PROJECT_ID_MISSING",
+            "PROJECT_BINDING_REQUIRED",
+            "AUTH_FAILED",
+            "AUTH_UNAVAILABLE",
+            "PERMISSION_DENIED",
+            "ENFORCEMENT_UNAVAILABLE",
+            "UNSUPPORTED_PROTOCOL",
+            "CONFLICT",
+            "EXPIRED",
+            "RESOURCE_LIMIT",
+            "AUDIT_UNAVAILABLE",
+            "INTEGRITY_FAILED",
+            "INTERNAL"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "request_id",
+    "kind",
+    "op"
+  ],
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "enum": [
+            "request",
+            "event"
+          ]
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "not": {
+        "required": [
+          "error"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "not": {
+        "required": [
+          "error"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "response"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "not": {
+        "required": [
+          "body"
+        ]
+      }
+    }
+  ]
+}
