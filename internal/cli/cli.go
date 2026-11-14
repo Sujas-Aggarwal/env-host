@@ -44,6 +44,7 @@ const help = `envh - project environments and controlled execution
 
 Project variables override inherited variables. Normal macOS runs apply a
 Seatbelt filesystem and network policy; --unsafe bypasses that policy.
+Requests made by a separate browser are outside the launched command's policy.
 Flags after --run belong to the application. No shell is inserted.
 macOS user authentication prompts for Touch ID or the login password before
 envh reads a project key from Keychain. Existing passphrase projects remain usable.

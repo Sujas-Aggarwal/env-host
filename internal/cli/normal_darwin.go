@@ -17,8 +17,8 @@ import (
 )
 
 var systemReadDirs = []string{
-	"/Applications", "/Library", "/System", "/bin", "/dev", "/etc", "/opt/homebrew",
-	"/private/etc", "/private/var/db", "/sbin", "/usr", "/usr/local",
+	"/Applications", "/Library", "/System", "/bin", "/dev", "/etc", "/opt",
+	"/private/etc", "/private/var/db", "/private/var/select", "/sbin", "/usr", "/usr/local",
 }
 
 func inRoot(path, root string) bool {
@@ -35,6 +35,12 @@ func sandboxProfile(root, temporary string, port int, rules policy.Policy) strin
 	write("(deny file-write*)")
 	write("(deny network-outbound)")
 	write(`(allow file-read* (literal "/"))`)
+	for _, dir := range []string{"/Users", "/private"} {
+		write("(allow file-read* (literal " + strconv.Quote(dir) + "))")
+	}
+	for dir := filepath.Dir(root); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		write("(allow file-read* (literal " + strconv.Quote(dir) + "))")
+	}
 	write(`(allow file-write* file-ioctl (regex #"^/dev/(null|tty[a-z0-9]*)$"))`)
 	for _, dir := range append(append([]string{}, systemReadDirs...), rules.ReadDirs...) {
 		write("(allow file-read* (subpath " + strconv.Quote(dir) + "))")

@@ -379,6 +379,33 @@ func TestMacPolicyControlsProxyAndDirectAccess(t *testing.T) {
 	}
 }
 
+func TestMacNormalRuntimeReadsAndNpmScript(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS Seatbelt integration")
+	}
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	for _, path := range []string{"/Users", "/opt", "/etc"} {
+		if _, stderr, code := f.invoke("", "--run", "/bin/ls", path); code != 0 {
+			t.Fatalf("cannot list default runtime path %s: %s", path, stderr)
+		}
+	}
+	npm, err := exec.LookPath("npm")
+	if err != nil {
+		t.Skip("npm is not installed")
+	}
+	packageJSON := `{"scripts":{"dev":"node -e \"process.stdout.write('npm-ok')\""}}`
+	if err := os.WriteFile(filepath.Join(f.dir, "package.json"), []byte(packageJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := f.cmd("--run", npm, "run", "dev", "--silent")
+	c.Env = append(c.Env, "npm_config_cache="+filepath.Join(f.dir, ".npm-cache"), "npm_config_update_notifier=false")
+	out, err := c.CombinedOutput()
+	if err != nil || string(out) != "npm-ok" {
+		t.Fatalf("npm script under normal mode failed: %v: %s", err, out)
+	}
+}
+
 func TestMacNormalRunForwardsInterrupt(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS Seatbelt integration")
