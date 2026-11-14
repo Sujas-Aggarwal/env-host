@@ -5,9 +5,11 @@ encrypted project environment storage, dotenv editor management, import, snapsho
 host execution with environment injection. The user's revised scope supersedes
 the removed architecture/task gates. Do not restore deleted planning files.
 
-- `envh --run` and `envh --unsafe --run` execute directly without isolation.
-- Do not advertise filesystem/network isolation. Unsupported secure/standard
-  modes must error rather than silently run.
+- `envh --run` on macOS applies a Seatbelt file/network profile and a local
+  domain-policy HTTP proxy. `envh --unsafe --run` bypasses them and executes
+  directly. Normal mode on Linux/Windows must fail closed until implemented.
+- Do not claim complete containment against IPC to unsandboxed host services.
+  Unsupported secure mode must error rather than silently run.
 - Preserve argv, cwd, terminal streams, signals, and application exit status.
   No run banners or log prefixes.
 - Keep project identity separate from secret values. Never print values except

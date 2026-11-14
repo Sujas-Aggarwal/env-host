@@ -2,7 +2,7 @@
 
 A Go CLI for project-specific environment variables. Initialize a project, import or manage its values, then run your application with those values injected.
 
-**This release runs directly on your machine, without filesystem or network isolation.** `--run` and `--unsafe --run` behave identically. Standard and Secure modes are not implemented.
+On macOS, `--run` applies a per-project Seatbelt file and network policy. HTTP and HTTPS traffic goes through a local proxy that checks the project's domain rules. `--unsafe --run` bypasses the policy and executes directly. Normal mode on Linux and Windows fails closed for now; use `--unsafe` there. Secure credential-proxy mode is not implemented.
 
 ## Build and install
 
@@ -36,8 +36,10 @@ may be a different directory and may not be on your shell's PATH.
 cd my-project
 envh init --env .env
 envh manage                 # opens vim, or $VISUAL / $EDITOR
+envh policy manage          # edit default, allow, block, read, and write rules
 envh snap
 envh --run npm run dev
+envh --unsafe --run npm run dev  # direct execution without policy
 ```
 
 Initialization creates a random project ID in `.h.env` and ensures Git ignores it. Imported values go into an encrypted local vault, not the marker. The original `.env` stays untouched.
@@ -46,7 +48,7 @@ On macOS, envh uses LocalAuthentication to ask for Touch ID or the Mac's login p
 
 Existing passphrase projects remain usable. `envh migrate` converts one to Keychain authentication after verifying the old passphrase and then asking macOS to authenticate the user. Migration leaves the vault unchanged if setup or authentication fails. Passphrases and interactive values are entered without echo. Repeating `init` on an unchanged project is harmless. The LocalAuthentication prompt gates envh's own key reads; the login Keychain item does not itself enforce biometric access against other programs running as the same macOS user.
 
-Project values **override matching shell variables**. Other shell variables, including PATH, remain available. Empty values stay empty. On macOS/Linux, envh replaces itself with the application, preserving cwd, terminal streams, signals, and exit status. There is no startup banner or implicit shell.
+Project values **override matching shell variables**. Other shell variables, including PATH, remain available. Empty values stay empty. Unsafe execution replaces envh with the application on macOS/Linux. Normal macOS execution keeps envh running to enforce the proxy, preserving the application's cwd, terminal streams, and exit status. There is no startup banner or implicit shell.
 
 ## Commands
 
@@ -64,18 +66,40 @@ Project values **override matching shell variables**. Other shell variables, inc
 | `envh unset NAME [NAME...]` | Delete entries; all requested names must exist |
 | `envh passwd` | Change a passphrase project's encryption passphrase |
 | `envh manage` | Open a dotenv-style text buffer in `$VISUAL`, `$EDITOR`, or `vi` |
+| `envh policy manage` | Edit this project's network and file access rules |
+| `envh policy show` | Show the current project policy |
 | `envh migrate` | Move a passphrase project to macOS Keychain authentication |
 | `envh auth status` | Check whether macOS user authentication is available |
 | `envh auth probe` | Try Touch ID/login-password authentication and Keychain access |
 | `envh snap` | Generate `.env.example` with names and empty assignments |
 | `envh snap --force` | Explicitly overwrite an existing snapshot |
-| `envh --run COMMAND [ARGS...]` | Direct execution with injected project values |
+| `envh --run COMMAND [ARGS...]` | macOS: execute with injected values and project policy |
+| `envh --unsafe --run COMMAND [ARGS...]` | Direct execution with injected values, bypassing policy |
 | `envh --project-id ID --run COMMAND` | Explicitly select another registered project |
 | `envh version` | Print the version |
 
 Global `--project-id ID` can also be supplied on management commands. All arguments after `--run` belong to the application, including flags that resemble envh flags. For shell syntax, explicitly use `envh --run sh -c '...'`.
 
 `envh manage` shows active variables as `NAME="value"`. Add lines, edit values, delete lines, or prefix a line with `#` to disable it. Comments and blank lines are kept in the encrypted vault for later edits. Saving the editor updates all active variables at once. If the edited file is malformed, nothing is saved. Env-host temporarily writes the editable values to an owner-only file and deletes that file when the editor exits; your editor may also create swap or backup files, so configure it accordingly for sensitive values.
+
+## macOS project policy
+
+`envh policy manage` opens a text editor. The policy lives in an owner-only project file under env-host's local storage. Lines beginning with `#` are comments. For example:
+
+```text
+default block
+allow api.example.com:443
+allow *.example.org
+block telemetry.example.org
+read ./data
+write ./build
+```
+
+`default` can be `allow` or `block`; a missing rule defaults to `block`. Matching `block` rules take precedence over `allow` rules, followed by the default. Host rules can name a domain, wildcard subdomains, or a literal IP, with an optional port. Literal IPs require an explicit `allow` even when the default is `allow`. `read` and `write` add existing directories, resolved relative to the project root or given as absolute paths. The project root is readable and writable by default. System program locations are readable; other file reads and writes are denied by Seatbelt. `write` also grants read access to that directory.
+
+Normal mode starts a short-lived HTTP proxy on localhost. It sets common proxy environment variables for the child and permits the sandboxed process to connect only to that proxy port. Proxy-aware HTTP and HTTPS clients can reach destinations permitted by the policy. Clients that ignore proxy settings, use unsupported protocols, or try direct sockets will fail to connect. The proxy resolves each permitted hostname once and dials that numeric address. Private and loopback destinations require an explicit literal-IP allow rule; named hosts that resolve there are denied. Normal mode also permits local inbound listening so a development server can bind localhost.
+
+This controls direct file operations and network connections by the launched process and descendants. It does not isolate every macOS IPC route to unsandboxed system services, and domain rules cannot identify a different HTTPS hostname tunneled over an already permitted IP. `sandbox-exec` is deprecated by macOS; a future macOS release may require another enforcement backend. If the sandbox cannot launch, envh fails rather than running the app without the policy.
 
 The nearest ancestor `.h.env` selects the project when running from a subdirectory. Snapshots go to the project root. An explicit ID uses the vault's registered root for snapshots; it does not change the application's cwd.
 
@@ -101,7 +125,7 @@ Back up the marker and encrypted vault deliberately. Losing either the project I
 
 ## Current limits
 
-No daemon, process/session manager, sandbox, network filtering, proxy integrations, cloud sync, or automatic provider-side key rotation. The Keychain user-presence path is implemented but has not passed a signed-build test on this machine. Applications receive raw environment values and can read, log, or transmit them. At-rest encryption does not protect against a compromised running application or developer account. This implementation has not had an independent cryptographic audit.
+No daemon, cloud sync, automatic provider-side key rotation, or credential-proxy integration. Applications receive raw environment values and can read, log, or transmit them wherever the selected run mode permits. At-rest encryption does not protect against a compromised running application or developer account. This implementation has not had an independent cryptographic audit.
 
 macOS is the development/test platform. Linux and Windows builds are checked separately; Windows uses a child process instead of POSIX exec and still needs native workflow validation. On Windows, filesystem access also depends on the directory's existing ACLs.
 

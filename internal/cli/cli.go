@@ -8,17 +8,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 
 	"env-host/internal/auth"
 	"env-host/internal/envfile"
+	"env-host/internal/policy"
 	"env-host/internal/project"
 	"env-host/internal/vault"
 )
 
-const Version = "0.2.0"
-const help = `envh - project environments, direct host execution
+const Version = "0.3.0"
+const help = `envh - project environments and controlled execution
 
   envh init [--env FILE] [--replace]        Initialize and optionally import
   envh init --passphrase                   Use a project passphrase if Keychain is unavailable
@@ -29,16 +31,19 @@ const help = `envh - project environments, direct host execution
   envh unset NAME [NAME...]                Delete variables
   envh passwd                             Change a passphrase project's passphrase
   envh manage                             Edit environment in your CLI editor
+  envh policy manage                      Edit network and file access rules
+  envh policy show                        Show the current project rules
   envh migrate                            Move a passphrase project to macOS Keychain
   envh auth status                        Check whether macOS user authentication is available
   envh auth probe                         Test Touch ID/login prompt and Keychain access
   envh snap [--force]                      Write names to .env.example
-  envh --run COMMAND [ARGS...]             Run with project values injected
-  envh --unsafe --run COMMAND [ARGS...]    Same direct execution
+  envh --run COMMAND [ARGS...]             macOS: apply project policy
+  envh --unsafe --run COMMAND [ARGS...]    Run directly without policy
   envh --project-id ID --run COMMAND       Select a project explicitly
   envh version
 
-Project variables override inherited variables. Commands run without isolation.
+Project variables override inherited variables. Normal macOS runs apply a
+Seatbelt filesystem and network policy; --unsafe bypasses that policy.
 Flags after --run belong to the application. No shell is inserted.
 macOS user authentication prompts for Touch ID or the login password before
 envh reads a project key from Keychain. Existing passphrase projects remain usable.
@@ -61,6 +66,7 @@ func Main(args []string) int {
 }
 func dispatch(args []string) (int, error) {
 	id := ""
+	unsafeMode := false
 	for len(args) > 0 {
 		switch args[0] {
 		case "--help", "-h", "help":
@@ -69,9 +75,12 @@ func dispatch(args []string) (int, error) {
 		case "--version", "version":
 			fmt.Println("envh " + Version)
 			return 0, nil
-		case "--secure", "--standard":
-			return 2, fmt.Errorf("only direct (unsafe) execution is implemented")
+		case "--secure":
+			return 2, fmt.Errorf("secure credential-proxy mode is not implemented")
+		case "--standard":
+			args = args[1:]
 		case "--unsafe":
+			unsafeMode = true
 			args = args[1:]
 		case "--project-id":
 			if len(args) < 2 {
@@ -84,7 +93,7 @@ func dispatch(args []string) (int, error) {
 			if len(args) > 0 && args[0] == "--" {
 				args = args[1:]
 			}
-			return run(id, args)
+			return run(id, args, unsafeMode)
 		default:
 			return command(id, args[0], args[1:])
 		}
@@ -141,7 +150,7 @@ func command(id, cmd string, args []string) (int, error) {
 		allowed["--stdin"] = false
 	case "snap":
 		allowed["--force"] = false
-	case "get", "list", "unset", "manage", "passwd", "migrate", "auth":
+	case "get", "list", "unset", "manage", "passwd", "migrate", "auth", "policy":
 	default:
 		return 2, fmt.Errorf("unknown command; run envh --help")
 	}
@@ -179,6 +188,19 @@ func command(id, cmd string, args []string) (int, error) {
 			return 2, fmt.Errorf("usage: envh auth status|probe")
 		}
 		return 0, nil
+	}
+	if cmd == "policy" {
+		if len(pos) != 1 {
+			return 2, fmt.Errorf("usage: envh policy manage|show")
+		}
+		switch pos[0] {
+		case "manage":
+			return 0, managePolicy(id)
+		case "show":
+			return 0, showPolicy(id)
+		default:
+			return 2, fmt.Errorf("usage: envh policy manage|show")
+		}
 	}
 	switch cmd {
 	case "init", "list", "snap", "manage", "passwd", "migrate":
@@ -658,11 +680,14 @@ func manage(id string) error {
 	return nil
 }
 
-func run(id string, args []string) (int, error) {
+func run(id string, args []string, unsafeMode bool) (int, error) {
 	if len(args) == 0 {
 		return 2, fmt.Errorf("--run requires an executable")
 	}
-	id, _, e := resolve(id)
+	if !unsafeMode && runtime.GOOS != "darwin" {
+		return 2, fmt.Errorf("normal mode needs macOS Seatbelt; use --unsafe to run directly on %s", runtime.GOOS)
+	}
+	id, discoveredRoot, e := resolve(id)
 	if e != nil {
 		return 1, e
 	}
@@ -678,13 +703,23 @@ func run(id string, args []string) (int, error) {
 	if e != nil {
 		return 1, e
 	}
-	values, _, e := store.Load(id, pass)
+	values, root, e := store.Load(id, pass)
+	var rules policy.Policy
+	if e == nil && !unsafeMode {
+		rules, _, e = loadPolicy(store, id, root)
+	}
 	unlock()
 	if e != nil {
 		return 1, e
 	}
 	env := environment(os.Environ(), values)
-	return launch(args, env)
+	if unsafeMode {
+		return launch(args, env)
+	}
+	if discoveredRoot != "" && discoveredRoot != root {
+		return 1, fmt.Errorf("project marker does not match registered root")
+	}
+	return launchNormal(args, env, root, store.Dir, rules)
 }
 func environment(base []string, values map[string]string) []string {
 	all := map[string]string{}

@@ -6,7 +6,11 @@ import (
 	"env-host/internal/auth"
 	"env-host/internal/project"
 	"env-host/internal/vault"
+	"errors"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -182,11 +186,11 @@ func TestFullWorkflow(t *testing.T) {
 	if child.Cwd != physical || child.Secret != "replacement\nwith newline" || child.Password != "" || len(child.Args) != 2 || child.Args[0] != "--secure" {
 		t.Fatalf("child contract failed: %#v", child)
 	}
-	out, err, code := f.invoke("", "--run", f.exe, "__child", "exit")
+	out, err, code := f.invoke("", "--unsafe", "--run", f.exe, "__child", "exit")
 	if out != "application-out\n" || err != "application-err\n" || code != 23 {
 		t.Fatal("streams or exit status altered", out, err, code)
 	}
-	if got = f.ok("piped input\n", "--run", f.exe, "__child", "copy"); got != "piped input\n" {
+	if got = f.ok("piped input\n", "--unsafe", "--run", f.exe, "__child", "copy"); got != "piped input\n" {
 		t.Fatal("stdin altered")
 	}
 	f.ok("", "unset", "DEBUG")
@@ -257,7 +261,7 @@ func TestWrongPasswordAndUnsafeTargets(t *testing.T) {
 	if _, _, code := f.invoke("", "--secure", "--run", f.exe, "__child", "copy"); code == 0 {
 		t.Fatal("unsupported mode allowed")
 	}
-	if _, _, code := f.invoke("", "--run", "envh-nonexistent-fixture-command"); code != 127 {
+	if _, _, code := f.invoke("", "--unsafe", "--run", "envh-nonexistent-fixture-command"); code != 127 {
 		t.Fatal("not-found exit", code)
 	}
 }
@@ -291,7 +295,7 @@ func TestRunReceivesInterrupt(t *testing.T) {
 	}
 	f := newFixture(t)
 	f.ok("", "init", "--passphrase")
-	c := f.cmd("--run", f.exe, "__child", "wait")
+	c := f.cmd("--unsafe", "--run", f.exe, "__child", "wait")
 	out, e := c.StdoutPipe()
 	if e != nil {
 		t.Fatal(e)
@@ -322,6 +326,91 @@ func TestRunReceivesInterrupt(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("interrupt not delivered")
+	}
+}
+
+func TestMacPolicyControlsProxyAndDirectAccess(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS Seatbelt integration")
+	}
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "allowed-response")
+	}))
+	defer server.Close()
+	host, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "http://" + net.JoinHostPort(host, port) + "/"
+	if _, _, code := f.invoke("", "--run", "/usr/bin/curl", "-sSf", "--max-time", "3", url); code == 0 {
+		t.Fatal("default network block was bypassed")
+	}
+	c := f.cmd("policy", "manage")
+	c.Env = append(c.Env, "VISUAL="+f.exe+" __editor", "EDITOR_FIXTURE=default block\nallow "+net.JoinHostPort(host, port)+"\n")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("policy edit failed: %v: %s", err, out)
+	}
+	if got := f.ok("", "--run", "/usr/bin/curl", "-sSf", "--max-time", "3", url); got != "allowed-response" {
+		t.Fatalf("allowed host failed: %q", got)
+	}
+	if _, _, code := f.invoke("", "--run", "/usr/bin/curl", "-sSf", "--noproxy", "*", "--max-time", "3", url); code == 0 {
+		t.Fatal("direct socket bypassed Seatbelt")
+	}
+	if got := f.ok("", "--unsafe", "--run", "/usr/bin/curl", "-sSf", "--max-time", "3", url); got != "allowed-response" {
+		t.Fatalf("unsafe bypass did not connect: %q", got)
+	}
+	outside := filepath.Join(filepath.Dir(f.dir), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside-data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := f.invoke("", "--run", "/bin/cat", outside); code == 0 {
+		t.Fatal("normal mode read outside project")
+	}
+	if got := f.ok("", "--unsafe", "--run", "/bin/cat", outside); got != "outside-data" {
+		t.Fatalf("unsafe file bypass failed: %q", got)
+	}
+	if _, _, code := f.invoke("", "--run", "/bin/sh", "-c", "exit 23"); code != 23 {
+		t.Fatalf("normal mode lost child exit status: %d", code)
+	}
+	if _, _, code := f.invoke("", "--run", "envh-nonexistent-fixture-command"); code != 127 {
+		t.Fatalf("normal mode lost missing-command exit status: %d", code)
+	}
+}
+
+func TestMacNormalRunForwardsInterrupt(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS Seatbelt integration")
+	}
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	c := f.cmd("--run", "/bin/sh", "-c", "echo ready; exec sleep 30")
+	stdout, err := c.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Process.Kill()
+	ready := make([]byte, 6)
+	if _, err = io.ReadFull(stdout, ready); err != nil || string(ready) != "ready\n" {
+		t.Fatalf("child did not start: %q, %v", ready, err)
+	}
+	if err = c.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- c.Wait() }()
+	select {
+	case err := <-finished:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 130 {
+			t.Fatalf("interrupt exit = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("normal run did not forward interrupt")
 	}
 }
 
@@ -385,6 +474,30 @@ func TestManageRejectsMalformedEditWithoutChangingVault(t *testing.T) {
 	}
 	if got := f.ok("", "get", "ONE"); got != "good" {
 		t.Fatal("vault changed after invalid edit")
+	}
+}
+
+func TestPolicyEditorRepairsMalformedPolicy(t *testing.T) {
+	f := newFixture(t)
+	f.ok("", "init", "--passphrase")
+	id, err := project.Read(f.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := policyPath(&vault.Store{Dir: filepath.Join(f.home, "projects")}, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, []byte("default invalid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := f.cmd("policy", "manage")
+	c.Env = append(c.Env, "VISUAL="+f.exe+" __editor", "EDITOR_FIXTURE=default block\nallow example.com\n")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("policy repair failed: %v: %s", err, out)
+	}
+	if got := f.ok("", "policy", "show"); got != "default block\nallow example.com\n" {
+		t.Fatalf("policy not repaired: %q", got)
 	}
 }
 
